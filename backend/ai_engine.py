@@ -696,70 +696,237 @@ def parse_voice_listing_intent(text: str) -> Dict[str, Any]:
         elif "five hundred" in text_lower or "500" in text_lower:
             qty_detected = 500
 
+    # Language detection (Unicode ranges for Telugu and Hindi)
+    has_telugu = any('\u0c00' <= ch <= '\u0c7f' for ch in text)
+    has_hindi = any('\u0900' <= ch <= '\u097f' for ch in text)
+
+    # Language‑specific response message
+    if has_telugu:
+        reply_msg = f"మీరు {qty_detected} {unit} {crop_detected} ను అమ్మడానికి {expected_price} రూపాయలకు/కిలోగ్రాం వద్ద లిస్టింగ్ సృష్టించారు. దయచేసి variety మరియు harvest date ని నిర్ధారించండి."
+    elif has_hindi:
+        reply_msg = f"आपने {qty_detected} {unit} {crop_detected} को {expected_price} रुपये/किग्रा पर बेचने के लिये ड्राफ्ट बनाया है। कृपया variety और harvest date की पुष्टि करें।"
+    else:
+        reply_msg = f"Recognized: {qty_detected} {unit} of {crop_detected} at expected ₹{expected_price}/{unit}. Please confirm the variety and harvest date to publish your listing."
+
     return {
         "status": "draft_created",
         "crop_name": crop_detected,
         "quantity": qty_detected,
         "unit": unit,
         "suggested_price": expected_price,
-        "message": f"Recognized: {qty_detected} {unit} of {crop_detected} at expected ₹{expected_price}/{unit}. Please confirm the variety and harvest date to publish your listing."
+        "message": reply_msg,
     }
+
+
+def _detect_lang(text: str) -> str:
+    """Detect script: 'te' for Telugu, 'hi' for Hindi, 'en' otherwise."""
+    if any('\u0c00' <= ch <= '\u0c7f' for ch in text):
+        return 'te'
+    if any('\u0900' <= ch <= '\u097f' for ch in text):
+        return 'hi'
+    return 'en'
+
 
 
 def handle_agriassist_chat(query: str, language: str = "en") -> Dict[str, Any]:
     """
-    AgriAssist conversational AI responses for farmer queries.
-    Supports English, Telugu, Hindi keywords.
+    AgriAssist conversational AI — detects the language of the query
+    (Telugu / Hindi / English) and responds in that SAME language so
+    TTS will speak in the correct voice.
     """
     q = query.lower()
+    lang = _detect_lang(query)  # auto-detect from script, ignore 'language' param
 
-    if "what crop should i grow" in q or "ఏ పంట వేయాలి" in q or "कौन सी फसल उगाऊं" in q:
-        return {
-            "reply": (
-                "Based on current seasonal patterns, **Tomato**, **Chilli (Guntur Teja)**, and **Maize** are exhibiting highest buyer demand and favorable price projections. "
-                "Would you like me to analyze your specific soil type and water availability in the 'What Should I Grow?' tool?"
+    # ── INTENT: Crop Recommendation ────────────────────────────────────────
+    crop_intent = (
+        "what crop should i grow" in q or
+        "what should i grow" in q or
+        "which crop" in q or
+        "ఏ పంట వేయాలి" in q or
+        "ఏ పంట" in q or
+        "పంట సూచన" in q or
+        "कौन सी फसल" in q or
+        "कौन सी फसल उगाऊं" in q or
+        "फसल सलाह" in q
+    )
+    if crop_intent:
+        replies = {
+            "te": (
+                "ప్రస్తుత సీజన్ ట్రెండ్‌ల ఆధారంగా, **టమాటా**, **మిర్చి (గుంటూర్ తేజా)**, మరియు **మొక్కజొన్న** అత్యధిక కొనుగోలుదారుల డిమాండ్ మరియు మంచి ధర అంచనాలతో ఉన్నాయి. "
+                "మీ నేల రకం మరియు నీటి లభ్యత ఆధారంగా వివరమైన సూచన కోసం 'ఏ పంట వేయాలి?' సాధనాన్ని తెరవాలా?"
             ),
+            "hi": (
+                "वर्तमान मौसम के अनुसार **टमाटर**, **मिर्च (गुंटूर तेजा)**, और **मक्का** सबसे अधिक मांग वाली फसलें हैं। "
+                "क्या आप अपनी मिट्टी और पानी की उपलब्धता के अनुसार सटीक सलाह चाहते हैं?"
+            ),
+            "en": (
+                "Based on current seasonal patterns, **Tomato**, **Chilli (Guntur Teja)**, and **Maize** have the highest buyer demand. "
+                "Would you like me to analyze your soil type and water availability in the 'What Should I Grow?' tool?"
+            ),
+        }
+        return {
+            "reply": replies[lang],
             "action_link": "/what-should-i-grow",
-            "action_label": "Open Crop Recommendation"
+            "action_label": "Open Crop Recommendation" if lang == "en" else ("పంట సూచన తెరవండి" if lang == "te" else "फसल सलाह खोलें"),
         }
-    elif "what is this crop" in q or "ఈ పంట ఏమిటి" in q or "यह कौन सा पौधा है" in q:
-        return {
-            "reply": (
-                "You can take or upload a photo in our **AI Crop Identification** tool! AgriLink’s computer vision model will detect the crop, variety, harvest readiness, and active buyers within seconds."
+
+    # ── INTENT: Crop Identification ─────────────────────────────────────────
+    id_intent = (
+        "what is this crop" in q or
+        "identify" in q or
+        "which plant" in q or
+        "ఈ పంట ఏమిటి" in q or
+        "పంట గుర్తింపు" in q or
+        "यह कौन सा पौधा" in q or
+        "फसल पहचान" in q
+    )
+    if id_intent:
+        replies = {
+            "te": (
+                "మీరు **AI పంట గుర్తింపు** సాధనంలో ఫోటో అప్‌లోడ్ చేయవచ్చు! "
+                "AgriLink యొక్క కంప్యూటర్ విజన్ మోడల్ పంట రకం, విత్తన రకం, పంట సిద్ధంగా ఉందా లేదా అని కొన్ని సెకన్లలో గుర్తిస్తుంది."
             ),
+            "hi": (
+                "आप हमारे **AI फसल पहचान** टूल में फ़ोटो अपलोड कर सकते हैं! "
+                "AgriLink का कंप्यूटर विजन मॉडल फसल, किस्म और कटाई की तैयारी कुछ ही सेकंड में बता देगा।"
+            ),
+            "en": (
+                "You can upload a photo in our **AI Crop Identification** tool! "
+                "AgriLink's model will detect the crop, variety, and harvest readiness within seconds."
+            ),
+        }
+        return {
+            "reply": replies[lang],
             "action_link": "/ai-crop-id",
-            "action_label": "Upload Photo Now"
+            "action_label": "Upload Photo Now" if lang == "en" else ("ఫోటో అప్‌లోడ్ చేయండి" if lang == "te" else "फ़ोटो अपलोड करें"),
         }
-    elif "price" in q or "trend" in q or "ధర" in q or "రేటు" in q or "भाव" in q:
-        return {
-            "reply": (
-                "Tomato prices are currently trending around **₹32/kg** (up 8% this week), while Chilli (S4/Teja) is strong at **₹185/kg**, and Onion is at **₹34/kg**. "
-                "Check out the interactive 'Price Intelligence' charts to see regional mandi comparisons and peak harvest months."
+
+    # ── INTENT: Price / Mandi Rate ──────────────────────────────────────────
+    price_intent = (
+        "price" in q or "trend" in q or "rate" in q or "mandi" in q or
+        "ధర" in q or "రేటు" in q or "మండి" in q or "ఎంత" in q or
+        "भाव" in q or "दाम" in q or "मंडी" in q or "रेट" in q
+    )
+    if price_intent:
+        replies = {
+            "te": (
+                "ప్రస్తుతం **టమాటా ₹32/కిలో** (ఈ వారం 8% పెరిగింది), **మిర్చి (S4/తేజా) ₹185/కిలో**, మరియు **ఉల్లిపాయ ₹34/కిలో**. "
+                "ప్రాంతీయ మండి పోలికలు మరియు గరిష్ట ధర నెలలు చూడటానికి 'ధర విశ్లేషణ' డాష్‌బోర్డ్‌ను తెరవండి."
             ),
+            "hi": (
+                "अभी **टमाटर ₹32/किग्रा** (इस हफ्ते 8% ऊपर), **मिर्च (S4/तेजा) ₹185/किग्रा**, और **प्याज ₹34/किग्रा** है। "
+                "क्षेत्रीय मंडी तुलना और उच्चतम कीमत के महीने देखने के लिए 'मूल्य बुद्धिमत्ता' डैशबोर्ड खोलें।"
+            ),
+            "en": (
+                "Tomato is trending at **₹32/kg** (up 8% this week), Chilli (S4/Teja) at **₹185/kg**, and Onion at **₹34/kg**. "
+                "Check the 'Price Intelligence' dashboard for regional mandi comparisons and peak months."
+            ),
+        }
+        return {
+            "reply": replies[lang],
             "action_link": "/price-intelligence",
-            "action_label": "View Price Dashboard"
+            "action_label": "View Price Dashboard" if lang == "en" else ("ధర డాష్‌బోర్డ్ చూడండి" if lang == "te" else "मूल्य डैशबोर्ड खोलें"),
         }
-    elif "who is buying" in q or "buyers near me" in q or "కొనేవారు ఎవరు" in q or "खरीदार कौन हैं" in q:
-        return {
-            "reply": (
-                "There are **8 verified commercial buyers** actively looking for produce within 50 km of your area right now, including FreshMart Retailers (500 kg Tomato) and Apex Agro Exports (1,200 kg Chilli)!"
+
+    # ── INTENT: Find Buyers ─────────────────────────────────────────────────
+    buyer_intent = (
+        "who is buying" in q or "buyers near" in q or "find buyer" in q or
+        "కొనేవారు" in q or "కొనుగోలుదారులు" in q or "ఎవరు కొంటున్నారు" in q or
+        "खरीदार" in q or "कौन खरीद" in q or "खरीदने वाले" in q
+    )
+    if buyer_intent:
+        replies = {
+            "te": (
+                "మీ ప్రాంతంలో 50 కి.మీ. లోపు **8 ధృవీకరించిన వాణిజ్య కొనుగోలుదారులు** చురుగ్గా ఉన్నారు — "
+                "FreshMart రిటైలర్స్ (500 కిలో టమాటా) మరియు Apex Agro Exports (1,200 కిలో మిర్చి) సహా!"
             ),
+            "hi": (
+                "आपके 50 किमी के भीतर **8 सत्यापित व्यावसायिक खरीदार** सक्रिय हैं — "
+                "FreshMart Retailers (500 किग्रा टमाटर) और Apex Agro Exports (1,200 किग्रा मिर्च) सहित!"
+            ),
+            "en": (
+                "There are **8 verified commercial buyers** within 50 km of your area — "
+                "including FreshMart Retailers (500 kg Tomato) and Apex Agro Exports (1,200 kg Chilli)!"
+            ),
+        }
+        return {
+            "reply": replies[lang],
             "action_link": "/smart-matching",
-            "action_label": "See Nearby Buyers"
+            "action_label": "See Nearby Buyers" if lang == "en" else ("సమీప కొనుగోలుదారులు చూడండి" if lang == "te" else "पास के खरीदार देखें"),
         }
-    elif "harvest" in q or "కోత" in q or "कटाई" in q:
-        return {
-            "reply": (
-                "For vegetables like Tomato, optimal harvest is when fruits turn breaker-to-pink stage (60-75 days after transplanting) for extended shelf life during buyer transit. For grain crops like Rice, harvest when 80-85% grains turn straw-golden."
+
+    # ── INTENT: Harvest Tips ────────────────────────────────────────────────
+    harvest_intent = (
+        "harvest" in q or "when to cut" in q or "ready to pick" in q or
+        "కోత" in q or "పంట కోయాలి" in q or "సిద్ధంగా" in q or
+        "कटाई" in q or "काटना" in q or "तैयार" in q
+    )
+    if harvest_intent:
+        replies = {
+            "te": (
+                "టమాటా వంటి కూరగాయలకు, కాయలు బ్రేకర్-నుండి-పింక్ దశకు మారినప్పుడు (నాటిన 60-75 రోజుల తర్వాత) కోయడం ఉత్తమం. "
+                "వరి వంటి ధాన్యాలకు, 80-85% గింజలు గోల్డెన్ రంగుకు మారినప్పుడు కోయండి."
             ),
+            "hi": (
+                "टमाटर जैसी सब्जियों के लिए, जब फल ब्रेकर-से-गुलाबी अवस्था में आएं (रोपाई के 60-75 दिन बाद) तब काटना सबसे अच्छा है। "
+                "धान जैसी फसलों के लिए, जब 80-85% दाने सुनहरे हो जाएं तब काटें।"
+            ),
+            "en": (
+                "For vegetables like Tomato, harvest at breaker-to-pink stage (60-75 days after transplanting). "
+                "For grain crops like Rice, harvest when 80-85% grains turn straw-golden."
+            ),
+        }
+        return {
+            "reply": replies[lang],
             "action_link": "/farmer-dashboard",
-            "action_label": "View Harvesting Tips"
+            "action_label": "View Harvesting Tips" if lang == "en" else ("పంట కోత చిట్కాలు" if lang == "te" else "कटाई सुझाव देखें"),
         }
-    else:
-        return {
-            "reply": (
-                f"Hello! I am **AgriAssist**, your AI farming and market partner. You can ask me about crop recommendations, market prices, buyer requests, or speak directly to create a crop listing!"
+
+    # ── INTENT: Sell / Listing ──────────────────────────────────────────────
+    sell_intent = (
+        "sell" in q or "list" in q or "create listing" in q or
+        "అమ్మకం" in q or "లిస్టింగ్" in q or "అమ్మాలి" in q or
+        "बेचना" in q or "लिस्ट" in q or "बिक्री" in q
+    )
+    if sell_intent:
+        replies = {
+            "te": (
+                "మీ పంట అమ్మకానికి పెట్టాలంటే — **'నా దగ్గర 200 కేజీల టమాటాలు అమ్మకానికి ఉన్నాయి'** అని చెప్పండి. "
+                "AgriAssist వెంటనే ధర అంచనాతో లిస్టింగ్ డ్రాఫ్ట్ తయారు చేస్తుంది!"
             ),
-            "action_link": "/smart-matching",
-            "action_label": "Explore Marketplace"
+            "hi": (
+                "अपनी फसल बेचने के लिए — **'मेरे पास 200 किलो टमाटर बेचने हैं'** बोलें। "
+                "AgriAssist तुरंत कीमत अनुमान के साथ लिस्टिंग ड्राफ्ट बनाएगा!"
+            ),
+            "en": (
+                "To sell your crop — say **'I have 200 kg of tomatoes to sell'**. "
+                "AgriAssist will instantly create a listing draft with a price estimate!"
+            ),
         }
+        return {
+            "reply": replies[lang],
+            "action_link": "/farmer-dashboard",
+            "action_label": "Open Listing Form" if lang == "en" else ("లిస్టింగ్ తెరవండి" if lang == "te" else "लिस्टिंग खोलें"),
+        }
+
+    # ── DEFAULT fallback ────────────────────────────────────────────────────
+    fallbacks = {
+        "te": (
+            "నమస్కారం! నేను **AgriAssist** AI. పంట ధరలు, కొనుగోలుదారులు, పంట గుర్తింపు లేదా లిస్టింగ్ గురించి నన్ను అడగండి. "
+            "ఉదాహరణ: 'టమాటా ధర ఎంత?', 'నా దగ్గర 200 కేజీలు అమ్మకానికి ఉన్నాయి'."
+        ),
+        "hi": (
+            "नमस्ते! मैं **AgriAssist** AI हूँ। फसल की कीमत, खरीदार, पहचान या लिस्टिंग के बारे में पूछें। "
+            "उदाहरण: 'टमाटर का भाव क्या है?', 'मेरे पास 200 किलो टमाटर बेचने हैं'।"
+        ),
+        "en": (
+            "Hello! I am **AgriAssist** AI. Ask me about crop prices, nearby buyers, crop identification, or creating a listing. "
+            "Example: 'What is the tomato price?' or 'I have 200 kg of rice to sell'."
+        ),
+    }
+    return {
+        "reply": fallbacks[lang],
+        "action_link": "/smart-matching",
+        "action_label": "Explore Marketplace" if lang == "en" else ("మార్కెట్‌ప్లేస్ చూడండి" if lang == "te" else "बाज़ार देखें"),
+    }
+

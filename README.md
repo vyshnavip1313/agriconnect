@@ -1,4 +1,4 @@
-# 🌱 AgriLink – AI-Powered Direct Agriculture Marketplace
+# 🌱 AgriConnect – AI-Powered Direct Agriculture Marketplace
 
 > **From Farm to Buyer. Direct. Smart. Transparent.**
 > Connecting farmers directly with verified commercial buyers using computer vision crop identification, seasonal intelligence, and smart matching.
@@ -71,18 +71,15 @@ npm run dev
 
 ---
 
-## 🌐 Git & GitHub Setup
+## 🌐 Git & GitHub Repository
 
-To push this repository to your GitHub account:
+This project is hosted on GitHub:
+👉 **[https://github.com/vyshnavip1313/agriconnect](https://github.com/vyshnavip1313/agriconnect)**
 
-1. Create a new repository on [GitHub.com](https://github.com/new) (e.g. `agrilink-ai-marketplace`).
-2. Run these commands in your project folder (`c:\Users\Mounika\OneDrive\Desktop\edvc`):
+To push or sync updates:
 
 ```bash
-git init
 git add .
-git commit -m "Initial commit: AgriLink AI Agriculture Marketplace"
-git branch -M main
-git remote add origin https://github.com/<YOUR_USERNAME>/<YOUR_REPO_NAME>.git
+git commit -m "Update AgriConnect"
 git push -u origin main
 ```

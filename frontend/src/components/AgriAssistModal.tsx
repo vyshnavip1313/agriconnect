@@ -1,7 +1,56 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Mic, MicOff, Send, Volume2, X, Sparkles, Bot, User, ArrowRight, Check } from 'lucide-react';
 import { api } from '../api';
 import { Language, translations } from '../i18n';
+
+// --- Language detection helpers ---
+type DetectedLang = 'te' | 'hi' | 'ta' | 'kn' | 'mr' | 'en';
+
+function detectTextLanguage(text: string): DetectedLang {
+  // Telugu: 0C00–0C7F
+  if (/[\u0C00-\u0C7F]/.test(text)) return 'te';
+  // Hindi/Marathi (Devanagari): 0900–097F  — distinguish by vocabulary later
+  if (/[\u0900-\u097F]/.test(text)) {
+    // Marathi common words
+    if (/माझ्याकड|मराठी|विकायच/.test(text)) return 'mr';
+    return 'hi';
+  }
+  // Tamil: 0B80–0BFF
+  if (/[\u0B80-\u0BFF]/.test(text)) return 'ta';
+  // Kannada: 0C80–0CFF
+  if (/[\u0C80-\u0CFF]/.test(text)) return 'kn';
+  return 'en';
+}
+
+const LANG_BCP47: Record<DetectedLang, string> = {
+  te: 'te-IN',
+  hi: 'hi-IN',
+  ta: 'ta-IN',
+  kn: 'kn-IN',
+  mr: 'mr-IN',
+  en: 'en-IN',
+};
+
+const LANG_LABEL: Record<DetectedLang, string> = {
+  te: 'తెలుగు',
+  hi: 'हिन्दी',
+  ta: 'தமிழ்',
+  kn: 'ಕನ್ನಡ',
+  mr: 'मराठी',
+  en: 'English',
+};
+
+// Find the best matching voice for a BCP-47 language tag
+function findVoice(bcp47: string): SpeechSynthesisVoice | null {
+  const voices = window.speechSynthesis.getVoices();
+  // Exact match first (e.g. te-IN)
+  let voice = voices.find(v => v.lang === bcp47) || null;
+  if (voice) return voice;
+  // Prefix match (e.g. te)
+  const prefix = bcp47.split('-')[0];
+  voice = voices.find(v => v.lang.startsWith(prefix)) || null;
+  return voice;
+}
 
 interface AgriAssistModalProps {
   isOpen: boolean;
@@ -27,69 +76,157 @@ export const AgriAssistModal: React.FC<AgriAssistModalProps> = ({
   onApplyVoiceListingDraft,
   onNavigateTab
 }) => {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      sender: 'bot',
-      text: language === 'te'
-        ? "నమస్కారం! నేను అగ్రిఅసిస్ట్ (AgriAssist) AI. పంట ధరలు, సమీపంలోని కొనుగోలుదారులు, లేదా పంట లిస్టింగ్ గురించి నాతో మాట్లాడండి."
-        : language === 'hi'
-        ? "नमस्ते! मैं एग्रीअसिस्ट (AgriAssist) AI हूँ। आप मुझसे मंडी भाव, फसल सलाह या बोलकर लिस्ट बनाने के लिए पूछ सकते हैं।"
-        : "Namaste! I am AgriAssist, your AI farm and market companion. You can speak or type to check mandi prices, crop advice, or say: 'I have 200 kilos of tomatoes to sell'."
+  // voiceLang: the language used for mic input AND TTS output
+  // Defaults to the app language, but user can override via the picker.
+  const [voiceLang, setVoiceLang] = useState<DetectedLang>(
+    (language as DetectedLang) || 'en'
+  );
+
+  const initialGreeting = () => {
+    switch (voiceLang) {
+      case 'te': return "నమస్కారం! నేను AgriAssist AI. పంట ధరలు, కొనుగోలుదారులు లేదా పంట లిస్టింగ్ గురించి మాట్లాడండి.";
+      case 'hi': return "नमस्ते! मैं AgriAssist AI हूँ। मंडी भाव, फसल सलाह या 'मेरे पास 200 किलो टमाटर हैं' बोलें।";
+      case 'ta': return "வணக்கம்! நான் AgriAssist AI. பயிர் விலை, வாங்குபவர்கள் அல்லது பட்டியல் பற்றி கேளுங்கள்.";
+      case 'kn': return "ನಮಸ್ಕಾರ! ನಾನು AgriAssist AI. ಬೆಳೆ ಬೆಲೆ, ಖರೀದಿದಾರರು ಅಥವಾ ಪಟ್ಟಿ ಬಗ್ಗೆ ಕೇಳಿ.";
+      case 'mr': return "नमस्कार! मी AgriAssist AI आहे. पीक भाव, खरेदीदार किंवा यादीसाठी विचारा.";
+      default:   return "Namaste! I am AgriAssist. Ask me about crop prices, nearby buyers, or say: 'I have 200 kg of tomatoes to sell'.";
     }
+  };
+
+  const [messages, setMessages] = useState<Message[]>([
+    { sender: 'bot', text: initialGreeting() }
   ]);
 
   const [inputQuery, setInputQuery] = useState("");
   const [isListening, setIsListening] = useState(false);
-  const [speechSupported, setSpeechSupported] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-
+  const recognitionRef = useRef<any>(null);
   const t = translations[language];
 
-  // Speech Recognition setup
-  const recognitionRef = useRef<any>(null);
+  // ── TTS: speak text in correct language ─────────────────────────────────
+  // Strategy:
+  //  1. Detect language of reply text (Telugu / Hindi / English etc.)
+  //  2. Try to use browser's native SpeechSynthesis with matching voice
+  //  3. If NO native voice found (common for Telugu on Windows),
+  //     fall back to Google Translate TTS audio — works for all languages
+  const speakText = useCallback((text: string) => {
+    // Strip markdown bold markers before speaking
+    const clean = text.replace(/\*\*/g, '').trim();
+    if (!clean) return;
 
-  useEffect(() => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      const recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = false;
-      recognition.lang = language === 'te' ? 'te-IN' : language === 'hi' ? 'hi-IN' : 'en-IN';
+    const detectedLang = detectTextLanguage(clean);
+    const bcp47 = LANG_BCP47[detectedLang];
 
-      recognition.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript;
-        setInputQuery(transcript);
-        handleSend(transcript);
-        setIsListening(false);
+    // ── Try native browser TTS first ──────────────────────────────────────
+    const tryNativeTTS = (): boolean => {
+      if (!('speechSynthesis' in window)) return false;
+      const voices = window.speechSynthesis.getVoices();
+      const voice = findVoice(bcp47);
+      if (!voice) return false; // no native voice for this language
+
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(clean);
+      utterance.voice = voice;
+      utterance.lang = voice.lang;
+      utterance.rate = 0.92;
+      window.speechSynthesis.speak(utterance);
+      return true;
+    };
+
+    // ── Google Translate TTS fallback ─────────────────────────────────────
+    // Works for Telugu (te), Hindi (hi), Tamil (ta), Kannada (kn), etc.
+    // Splits long text into ≤200-char chunks (GT limit) and plays them sequentially.
+    const playGoogleTTS = (textChunks: string[], idx = 0) => {
+      if (idx >= textChunks.length) return;
+      const chunk = encodeURIComponent(textChunks[idx]);
+      // Use Google Translate TTS (free, no API key needed for short requests)
+      const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${chunk}&tl=${detectedLang}&client=tw-ob`;
+      const audio = new Audio(url);
+      audio.onended = () => playGoogleTTS(textChunks, idx + 1);
+      audio.onerror = () => {
+        // If Google TTS fails (network/CORS), silently skip — text is still shown
+        console.warn('Google TTS unavailable, text shown in chat.');
       };
+      audio.play().catch(() => {
+        console.warn('Audio playback blocked. User interaction may be required.');
+      });
+    };
 
-      recognition.onerror = () => {
-        setIsListening(false);
+    // Split text into ≤200 char pieces at sentence boundaries
+    const splitText = (t: string, maxLen = 190): string[] => {
+      const chunks: string[] = [];
+      let remaining = t;
+      while (remaining.length > maxLen) {
+        // Try to break at last period/comma/space before maxLen
+        let breakAt = remaining.lastIndexOf('.', maxLen);
+        if (breakAt < 80) breakAt = remaining.lastIndexOf(' ', maxLen);
+        if (breakAt < 1) breakAt = maxLen;
+        chunks.push(remaining.slice(0, breakAt + 1).trim());
+        remaining = remaining.slice(breakAt + 1).trim();
+      }
+      if (remaining.length > 0) chunks.push(remaining);
+      return chunks;
+    };
+
+    // First attempt: native voices (available immediately or after load)
+    const voices = window.speechSynthesis?.getVoices() ?? [];
+    if (voices.length > 0) {
+      if (tryNativeTTS()) return;
+      // No native voice — use Google TTS
+      playGoogleTTS(splitText(clean));
+    } else if ('speechSynthesis' in window) {
+      // Voices not loaded yet — wait then retry
+      window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.onvoiceschanged = null;
+        if (!tryNativeTTS()) {
+          playGoogleTTS(splitText(clean));
+        }
       };
-
-      recognition.onend = () => {
-        setIsListening(false);
-      };
-
-      recognitionRef.current = recognition;
     } else {
-      setSpeechSupported(false);
+      // No speechSynthesis at all — go straight to Google TTS
+      playGoogleTTS(splitText(clean));
     }
-  }, [language]);
+  }, []);
+
+
+  // ── Speech Recognition: use voiceLang for mic locale ────────────────────
+  useEffect(() => {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = LANG_BCP47[voiceLang];
+
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      setInputQuery(transcript);
+      handleSend(transcript);
+      setIsListening(false);
+    };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend   = () => setIsListening(false);
+    recognitionRef.current = recognition;
+  }, [voiceLang]); // re-init recognition when user picks a different language
 
   const toggleListening = () => {
     if (!recognitionRef.current) {
-      // Simulate voice input demo for testing
-      const sampleVoice = language === 'te'
-        ? "నా దగ్గర 200 కేజీల టమాటాలు అమ్మకానికి ఉన్నాయి"
-        : language === 'hi'
-        ? "मेरे पास 200 किलो टमाटर बेचने के लिए हैं"
-        : "I have 200 kilos of tomatoes to sell";
-      setInputQuery(sampleVoice);
-      handleSend(sampleVoice);
+      // Demo fallback when browser has no Speech API
+      const samples: Record<DetectedLang, string> = {
+        te: "నా దగ్గర 200 కేజీల టమాటాలు అమ్మకానికి ఉన్నాయి",
+        hi: "मेरे पास 200 किलो टमाटर बेचने के लिए हैं",
+        ta: "என்னிடம் 200 கிலோ தக்காளி விற்கவிருக்கிறது",
+        kn: "ನನ್ನ ಬಳಿ 200 ಕೆಜಿ ಟೊಮ್ಯಾಟೊ ಮಾರಾಟಕ್ಕಿದೆ",
+        mr: "माझ्याकडे 200 किलो टमाटे विकायचे आहेत",
+        en: "I have 200 kilos of tomatoes to sell",
+      };
+      const sample = samples[voiceLang];
+      setInputQuery(sample);
+      handleSend(sample);
       return;
     }
-
     if (isListening) {
       recognitionRef.current.stop();
       setIsListening(false);
@@ -97,19 +234,9 @@ export const AgriAssistModal: React.FC<AgriAssistModalProps> = ({
       try {
         recognitionRef.current.start();
         setIsListening(true);
-      } catch (err) {
+      } catch {
         setIsListening(false);
       }
-    }
-  };
-
-  const speakText = (text: string) => {
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = language === 'te' ? 'te-IN' : language === 'hi' ? 'hi-IN' : 'en-IN';
-      utterance.rate = 0.95;
-      window.speechSynthesis.speak(utterance);
     }
   };
 
@@ -122,15 +249,24 @@ export const AgriAssistModal: React.FC<AgriAssistModalProps> = ({
     setMessages(newMessages);
     setInputQuery("");
 
-    // Check if voice listing intent
-    const isListingIntent = q.toLowerCase().includes("sell") ||
+    // Auto-detect language of typed/spoken input, update voiceLang
+    const inputLang = detectTextLanguage(q);
+    if (inputLang !== 'en') setVoiceLang(inputLang);
+
+    // Check if voice listing intent (multilingual keywords)
+    const isListingIntent =
+      q.toLowerCase().includes("sell") ||
       q.toLowerCase().includes("have") ||
       q.toLowerCase().includes("kilos") ||
       q.toLowerCase().includes("kg") ||
       q.includes("అమ్మకానికి") ||
       q.includes("కేజీ") ||
       q.includes("बेचने") ||
-      q.includes("किलो");
+      q.includes("किलो") ||
+      q.includes("விற்க") ||
+      q.includes("மாரல்") ||
+      q.includes("ಮಾರಾಟ") ||
+      q.includes("विकायच");
 
     if (isListingIntent) {
       try {
@@ -168,7 +304,7 @@ export const AgriAssistModal: React.FC<AgriAssistModalProps> = ({
           action_label: chatRes.action_label
         }
       ]);
-      speakText(chatRes.reply.replace(/\*\*/g, ''));
+      speakText(chatRes.reply);
     } catch (err) {
       setMessages([
         ...newMessages,
@@ -244,9 +380,31 @@ export const AgriAssistModal: React.FC<AgriAssistModalProps> = ({
             </div>
           </div>
 
-          <button onClick={onClose} style={{ background: 'none', color: 'var(--text-muted)' }}>
-            <X size={20} />
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {/* Language Selector */}
+            <select
+              value={voiceLang}
+              onChange={e => setVoiceLang(e.target.value as DetectedLang)}
+              title="Select voice language"
+              style={{
+                fontSize: '0.75rem',
+                padding: '4px 8px',
+                borderRadius: '8px',
+                border: '1px solid var(--primary-200)',
+                backgroundColor: '#ffffff',
+                color: 'var(--primary-800)',
+                fontWeight: 600,
+                cursor: 'pointer'
+              }}
+            >
+              {(Object.keys(LANG_LABEL) as DetectedLang[]).map(code => (
+                <option key={code} value={code}>{LANG_LABEL[code]}</option>
+              ))}
+            </select>
+            <button onClick={onClose} style={{ background: 'none', color: 'var(--text-muted)' }}>
+              <X size={20} />
+            </button>
+          </div>
         </div>
 
         {/* Message Log */}
@@ -404,7 +562,7 @@ export const AgriAssistModal: React.FC<AgriAssistModalProps> = ({
             value={inputQuery}
             onChange={(e) => setInputQuery(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-            placeholder={isListening ? t.voiceListening : "Ask in English, Telugu, or Hindi..."}
+            placeholder={isListening ? (voiceLang === 'te' ? 'వింటున్నాను...' : voiceLang === 'hi' ? 'सुन रहा हूँ...' : voiceLang === 'ta' ? 'கேட்கிறேன்...' : voiceLang === 'kn' ? 'ಕೇಳುತ್ತಿದ್ದೇನೆ...' : voiceLang === 'mr' ? 'ऐकतो आहे...' : 'Listening...') : (voiceLang === 'te' ? 'తెలుగులో అడగండి...' : voiceLang === 'hi' ? 'हिन्दी में पूछें...' : voiceLang === 'ta' ? 'தமிழில் கேளுங்கள்...' : voiceLang === 'kn' ? 'ಕನ್ನಡದಲ್ಲಿ ಕೇಳಿ...' : voiceLang === 'mr' ? 'मराठीत विचारा...' : 'Ask in English, Telugu, Hindi...')}
             style={{ flex: 1, height: '46px', borderRadius: '12px' }}
           />
 
